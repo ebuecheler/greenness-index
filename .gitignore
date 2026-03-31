@@ -1,0 +1,50 @@
+# ==============================================================================
+# Greenness Index – .gitignore
+# ==============================================================================
+
+# Grosse Raster-Dateien (Drohnenbilder) – nicht im Repo speichern
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+
+# Berechnete Ergebnisse (werden lokal generiert)
+Resultate GI/polygone_gi/
+Resultate GI/greenness_index.csv
+Resultate GI/.Rhistory
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.spec
+
+# Virtuelle Umgebungen
+.venv/
+venv/
+env/
+.env
+
+# Betriebssystem
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporaere Dateien
+*.tmp
+*.bak
+*.log
+
+# Setup-Skript enthaelt Token – NIEMALS pushen!
+SETUP_GITHUB.ps1
