@@ -12,7 +12,7 @@ Workflow:
   2. Feldname aus Dropdown waehlen (laedt passendes Polygon-GeoJSON)
   3. Vorschau: Bild mit Polygon-Overlay
   4. Optional: Polygone im Editor anpassen
-  5. Greenness Index berechnen (GI = G / (R+G+B))
+  5. Indizes berechnen (GI = G/(R+G+B)  |  MGRVI = (G²-R²)/(G²+R²))
   6. Ergebnisse speichern (GeoJSON + CSV)
 
 Voraussetzungen:
@@ -206,6 +206,10 @@ def extract_date(filepath: str):
 
 def gi_col(date_str: str) -> str:
     return f"GI_{date_str}"
+
+
+def mgrvi_col(date_str: str) -> str:
+    return f"MGRVI_{date_str}"
 
 
 def available_fields() -> list:
@@ -495,7 +499,7 @@ class MainApp:
             d = self.image_date
             human = f"{d[4:]}.{d[2:4]}.20{d[:2]}"
             self.lbl_date.config(
-                text=f"Datum: {human}   ·   Spaltenname: {gi_col(d)}",
+                text=f"Datum: {human}   ·   Spalten: {gi_col(d)}, {mgrvi_col(d)}",
                 fg=CLR_BLUE)
         else:
             self.lbl_date.config(
@@ -565,9 +569,11 @@ class MainApp:
         poly_dir = os.path.join(RESULTATE_DIR, "polygone_gi")
         os.makedirs(poly_dir, exist_ok=True)
 
-        date_str = self.image_date or "unbekannt"
-        col      = gi_col(date_str)
-        gi_map   = {}
+        date_str   = self.image_date or "unbekannt"
+        col_gi     = gi_col(date_str)
+        col_mgrvi  = mgrvi_col(date_str)
+        gi_map     = {}
+        mgrvi_map  = {}
 
         with rasterio.open(self.image_path) as src:
             for _, row in gdf.iterrows():
@@ -582,49 +588,68 @@ class MainApp:
                     B     = out_img[2].astype(np.float64)
                     total = R + G + B
                     valid = total > 0
-                    gi    = np.where(valid, G / total, np.nan)
+
+                    # GI = G / (R + G + B)
+                    gi = np.where(valid, G / total, np.nan)
                     gi_map[name] = (float(np.nanmean(gi))
                                     if valid.any() else np.nan)
+
+                    # MGRVI = (G² - R²) / (G² + R²)
+                    g2      = G ** 2
+                    r2      = R ** 2
+                    denom   = g2 + r2
+                    valid_m = denom > 0
+                    mgrvi   = np.where(valid_m, (g2 - r2) / denom, np.nan)
+                    mgrvi_map[name] = (float(np.nanmean(mgrvi))
+                                       if valid_m.any() else np.nan)
+
                 except Exception as exc:
-                    gi_map[name] = np.nan
+                    gi_map[name]    = np.nan
+                    mgrvi_map[name] = np.nan
                     print(f"  Warnung Polygon '{name}': {exc}")
 
         gdf_out = gdf.copy()
         if NAME_PROP in gdf_out.columns:
-            gdf_out['GI'] = gdf_out[NAME_PROP].astype(str).map(gi_map)
+            gdf_out['GI']    = gdf_out[NAME_PROP].astype(str).map(gi_map)
+            gdf_out['MGRVI'] = gdf_out[NAME_PROP].astype(str).map(mgrvi_map)
         else:
-            gdf_out['GI'] = np.nan
+            gdf_out['GI']    = np.nan
+            gdf_out['MGRVI'] = np.nan
 
         safe_name = re.sub(r'[\\/:*?"<>|]', '_', self.field_name)
         poly_path = os.path.join(poly_dir, f"{safe_name}_{date_str}.geojson")
         gdf_out.to_file(poly_path, driver='GeoJSON')
 
-        csv_path   = os.path.join(RESULTATE_DIR, "greenness_index.csv")
-        new_series = pd.Series(gi_map, name=col)
-        new_series.index.name = 'Streifen'
+        csv_path = os.path.join(RESULTATE_DIR, "greenness_index.csv")
+        new_df   = pd.DataFrame({
+            col_gi:    pd.Series(gi_map),
+            col_mgrvi: pd.Series(mgrvi_map),
+        })
+        new_df.index.name = 'Streifen'
 
         if os.path.exists(csv_path):
             df = pd.read_csv(csv_path, index_col=0)
             df.index.name = 'Streifen'
-            if col in df.columns:
-                for strip, val in new_series.items():
-                    df.loc[strip, col] = val
-            else:
-                df = df.join(new_series, how='outer')
+            for col, series in new_df.items():
+                if col in df.columns:
+                    for strip, val in series.items():
+                        df.loc[strip, col] = val
+                else:
+                    df = df.join(series, how='outer')
         else:
-            df = new_series.to_frame()
+            df = new_df
         df.to_csv(csv_path)
 
         n_ok  = sum(1 for v in gi_map.values() if not np.isnan(v))
         n_all = len(gi_map)
         messagebox.showinfo(
-            "Fertig - Greenness Index berechnet",
+            "Fertig - Indizes berechnet",
             f"Berechnung abgeschlossen!\n\n"
             f"Polygone berechnet: {n_ok} / {n_all}\n\n"
             f"Gespeichert in:\n  {RESULTATE_DIR}\n\n"
             f"  Polygone: polygone_gi/{os.path.basename(poly_path)}\n"
             f"  CSV:      greenness_index.csv\n"
-            f"  Spalte:   {col}")
+            f"  Spalten:  {col_gi}, {col_mgrvi}")
 
 
 # ==============================================================================
