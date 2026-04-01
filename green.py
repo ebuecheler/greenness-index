@@ -22,6 +22,7 @@ Voraussetzungen:
 import os
 import re
 import time
+import math
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -342,11 +343,21 @@ def _draw_polygons(ax, gdf: gpd.GeoDataFrame,
 
             if is_sel and show_handles:
                 coords = list(poly.exterior.coords[:-1])
+                n = len(coords)
+                # Eckpunkt-Handles (gelbe Quadrate)
                 ax.plot([c[0] for c in coords],
                         [c[1] for c in coords],
                         's', color='#fde047', markersize=9,
                         markeredgecolor='#1e293b', markeredgewidth=0.8,
                         zorder=5)
+                # Kantenmittelpunkt-Handles (weisse Kreise = Resize)
+                for ei in range(n):
+                    ax_, ay_ = coords[ei]
+                    bx, by   = coords[(ei + 1) % n]
+                    mx, my   = (ax_ + bx) / 2, (ay_ + by) / 2
+                    ax.plot(mx, my, 'o', color='white', markersize=7,
+                            markeredgecolor='#1e293b', markeredgewidth=0.8,
+                            zorder=5)
 
             name_val = row[NAME_PROP] if NAME_PROP in row.index else str(idx)
             ctr = poly.centroid
@@ -833,6 +844,7 @@ class EditorWindow:
         self._drag_mode  = None
         self._drag_start = None
         self._act_corner = None
+        self._act_edge   = None
         self._mouse_down = False
         self._ctrl_held  = False
         self._panning      = False
@@ -850,6 +862,12 @@ class EditorWindow:
         self._rebuild_sindex()
         self.win.bind('<Control-z>', lambda _: self._undo())
         self.win.bind('<Control-Z>', lambda _: self._undo())
+        self.win.bind('<Control-a>', lambda _: self._select_all())
+        self.win.bind('<Control-A>', lambda _: self._select_all())
+        for key in ('<Left>', '<Right>', '<Up>', '<Down>',
+                    '<Shift-Left>', '<Shift-Right>',
+                    '<Shift-Up>', '<Shift-Down>'):
+            self.win.bind(key, self._on_arrow_key)
 
     # --------------------------------------------------------------------------
     # UI-Aufbau
@@ -861,10 +879,11 @@ class EditorWindow:
                        highlightbackground=CLR_HINT_BD, highlightthickness=1)
         bar.pack(side='top', fill='x')
         tk.Label(bar,
-                 text=("Klick = Auswaehlen    Ctrl+Klick = Mehrfach    "
-                       "Polygon ziehen = Verschieben    "
-                       "Ecke (Quadrat) ziehen = Verformen    "
-                       "Ctrl+Z = Rueckgaengig"),
+                 text=("Klick/Ziehen innen = Verschieben    "
+                       "Kante (Kreis) ziehen = Groesse aendern    "
+                       "Ecke (Quadrat) = Frei verformen    "
+                       "Pfeiltasten = Feinverschiebung (Shift = grob)    "
+                       "Ctrl+A = Alle    Ctrl+Z = Rueckgaengig"),
                  bg=CLR_HINT_BG, fg=CLR_BLUE, font=FONT_SMALL
                  ).pack(side='left', padx=14, pady=6)
         make_danger_btn(bar, "Rueckgaengig  Ctrl+Z",
@@ -1051,6 +1070,10 @@ class EditorWindow:
             messagebox.showinfo("Rueckgaengig",
                                 "Keine weiteren Schritte zum Rueckgaengigmachen.")
 
+    def _select_all(self):
+        self.selected = set(self.gdf_work.index)
+        self._redraw()
+
     # --------------------------------------------------------------------------
     # Hilfsmethoden fuer Interaktion
     # --------------------------------------------------------------------------
@@ -1092,6 +1115,29 @@ class EditorWindow:
                         return (idx, ci)
         return None
 
+    def _edge_at(self, x, y):
+        """
+        Gibt (poly_idx, edge_idx) zurueck wenn der Mauszeiger nahe am
+        Mittelpunkt einer Kante eines ausgewaehlten Polygons ist.
+        edge_idx ist der Index des ersten Eckpunkts der Kante.
+        """
+        tol = self._tol() * 1.5
+        for idx in self.selected:
+            g = self.gdf_work.at[idx, self._geo_col()]
+            if g is None or g.is_empty:
+                continue
+            polys = ([g] if g.geom_type == 'Polygon' else list(g.geoms))
+            for poly in polys:
+                coords = list(poly.exterior.coords[:-1])
+                n = len(coords)
+                for ei in range(n):
+                    ax_, ay_ = coords[ei]
+                    bx, by   = coords[(ei + 1) % n]
+                    mx, my   = (ax_ + bx) / 2, (ay_ + by) / 2
+                    if abs(mx - x) < tol and abs(my - y) < tol:
+                        return (idx, ei)
+        return None
+
     # --------------------------------------------------------------------------
     # Mausereignisse
     # --------------------------------------------------------------------------
@@ -1125,20 +1171,30 @@ class EditorWindow:
             return
         self._mouse_down = True
         x, y = event.xdata, event.ydata
+        ctrl = (self._ctrl_held
+                or (event.key is not None
+                    and 'control' in str(event.key).lower()))
 
+        # Prioritaet: 1. Eckpunkt  2. Kantenmitte  3. Innenflaeche  4. Leerraum
         corner = self._corner_at(x, y)
         if corner:
             self._push_undo()
             self._drag_mode  = 'corner'
             self._act_corner = corner
             self._drag_start = (x, y)
+            self.canvas.get_tk_widget().config(cursor='crosshair')
             return
 
-        idx  = self._poly_at(x, y)
-        ctrl = (self._ctrl_held
-                or (event.key is not None
-                    and 'control' in str(event.key).lower()))
+        edge = self._edge_at(x, y)
+        if edge:
+            self._push_undo()
+            self._drag_mode = 'edge'
+            self._act_edge  = edge
+            self._drag_start = (x, y)
+            self.canvas.get_tk_widget().config(cursor='sizing')
+            return
 
+        idx = self._poly_at(x, y)
         if idx is not None:
             if ctrl:
                 if idx in self.selected:
@@ -1151,6 +1207,7 @@ class EditorWindow:
                 self._push_undo()
                 self._drag_mode  = 'move'
                 self._drag_start = (x, y)
+                self.canvas.get_tk_widget().config(cursor='fleur')
         else:
             if not ctrl:
                 self.selected.clear()
@@ -1179,6 +1236,13 @@ class EditorWindow:
 
         if getattr(self, 'toolbar', None) and self.toolbar.mode != '':
             return
+
+        # Cursor-Feedback wenn nicht am Ziehen
+        if (not self._mouse_down
+                and event.inaxes == self.ax
+                and event.xdata is not None):
+            self._update_cursor(event.xdata, event.ydata)
+
         if (not self._mouse_down
                 or event.inaxes != self.ax
                 or event.xdata is None
@@ -1203,6 +1267,44 @@ class EditorWindow:
                     self.gdf_work.at[idx, gc], dx, dy)
             self._drag_start = (x, y)
             self._fast_redraw()
+
+        elif self._drag_mode == 'edge' and self._act_edge:
+            ridx, eidx = self._act_edge
+            g_ref = self.gdf_work.at[ridx, gc]
+            if g_ref and g_ref.geom_type == 'Polygon':
+                coords_ref = list(g_ref.exterior.coords[:-1])
+                n_ref      = len(coords_ref)
+                ax_, ay_   = coords_ref[eidx]
+                bx,  by_   = coords_ref[(eidx + 1) % n_ref]
+                ex,  ey    = bx - ax_, by_ - ay_
+                elen       = math.sqrt(ex ** 2 + ey ** 2)
+                if elen > 1e-10:
+                    nx, ny = -ey / elen, ex / elen
+                    proj   = dx * nx + dy * ny
+                    vx, vy = proj * nx, proj * ny
+                    updated = False
+                    for idx in self.selected:
+                        g2 = self.gdf_work.at[idx, gc]
+                        if g2 is None or g2.is_empty or g2.geom_type != 'Polygon':
+                            continue
+                        c2 = list(g2.exterior.coords[:-1])
+                        n2 = len(c2)
+                        if eidx >= n2:
+                            continue
+                        c2[eidx]          = (c2[eidx][0]          + vx,
+                                             c2[eidx][1]          + vy)
+                        c2[(eidx+1) % n2] = (c2[(eidx+1) % n2][0] + vx,
+                                             c2[(eidx+1) % n2][1] + vy)
+                        try:
+                            ng = Polygon(c2)
+                            if ng.is_valid and not ng.is_empty:
+                                self.gdf_work.at[idx, gc] = ng
+                                updated = True
+                        except Exception:
+                            pass
+                    if updated:
+                        self._drag_start = (x, y)
+                        self._fast_redraw()
 
         elif self._drag_mode == 'corner' and self._act_corner:
             ridx, cidx = self._act_corner
@@ -1232,6 +1334,52 @@ class EditorWindow:
         self._drag_mode  = None
         self._drag_start = None
         self._act_corner = None
+        self._act_edge   = None
+        self.canvas.get_tk_widget().config(cursor='')
+
+    # --------------------------------------------------------------------------
+    # Cursor-Feedback
+    # --------------------------------------------------------------------------
+
+    def _update_cursor(self, x, y):
+        """Passt den Mauszeiger je nach Hover-Ziel an."""
+        widget = self.canvas.get_tk_widget()
+        if self._corner_at(x, y):
+            widget.config(cursor='crosshair')
+        elif self._edge_at(x, y):
+            widget.config(cursor='sizing')
+        elif self._poly_at(x, y) is not None:
+            widget.config(cursor='fleur')
+        else:
+            widget.config(cursor='')
+
+    # --------------------------------------------------------------------------
+    # Pfeiltasten-Verschiebung
+    # --------------------------------------------------------------------------
+
+    def _on_arrow_key(self, event):
+        """Verschiebt ausgewaehlte Polygone mit Pfeiltasten.
+        Normal: fein  |  Shift: grob (10x)
+        """
+        if not self.selected:
+            return
+        b    = self.app.raster_bounds
+        fine = (b.right - b.left) / self.app.raster_shape[1] * 3
+        step = fine * 10 if 'shift' in event.keysym.lower() else fine
+
+        for k, (dx, dy) in (('left',  (-step,    0)),
+                             ('right', ( step,    0)),
+                             ('up',    (    0,  step)),
+                             ('down',  (    0, -step))):
+            if k in event.keysym.lower():
+                self._push_undo()
+                gc = self._geo_col()
+                for idx in self.selected:
+                    self.gdf_work.at[idx, gc] = shp_translate(
+                        self.gdf_work.at[idx, gc], dx, dy)
+                self._rebuild_sindex()
+                self._redraw()
+                return
 
     # --------------------------------------------------------------------------
     # Numerische Transformationen
