@@ -50,6 +50,7 @@ BASE_DIR           = os.path.dirname(os.path.abspath(__file__))
 POLYGONE_DIR       = os.path.join(BASE_DIR, "polygone")
 RESULTATE_DIR      = os.path.join(BASE_DIR, "Resultate GI")
 SAVED_LAYOUTS_DIR  = os.path.join(POLYGONE_DIR, "saved_layouts")
+KARTEN_DIR         = os.path.join(RESULTATE_DIR, "Karten")
 
 DEFAULT_IMG_DIR = (
     r"G:\.shortcut-targets-by-id"
@@ -212,6 +213,31 @@ def gi_col(date_str: str) -> str:
 
 def mgrvi_col(date_str: str) -> str:
     return f"MGRVI_{date_str}"
+
+
+# 10-step MGRVI colour scale: -1 (R>>G) → red  ..  +1 (G>>R) → green
+MGRVI_COLORS = [
+    (-1.0, -0.8, '#7f1d1d'),
+    (-0.8, -0.6, '#b91c1c'),
+    (-0.6, -0.4, '#dc2626'),
+    (-0.4, -0.2, '#f97316'),
+    (-0.2,  0.0, '#eab308'),
+    ( 0.0,  0.2, '#a3e635'),
+    ( 0.2,  0.4, '#4ade80'),
+    ( 0.4,  0.6, '#16a34a'),
+    ( 0.6,  0.8, '#15803d'),
+    ( 0.8,  1.01,'#14532d'),   # 1.01 so val==1.0 is included
+]
+
+
+def mgrvi_to_hex(val: float) -> str:
+    """Gibt den HEX-Farbcode fuer einen MGRVI-Wert zurueck (10 Kategorien)."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return '#94a3b8'   # grau fuer NaN
+    for lo, hi, hex_col in MGRVI_COLORS:
+        if lo <= val < hi:
+            return hex_col
+    return '#14532d'       # Fallback fuer val == 1.0
 
 
 def available_fields() -> list:
@@ -823,6 +849,8 @@ class MainApp:
                     mgrvi_map[name] = np.nan
                     print(f"  Warnung Polygon '{name}': {exc}")
 
+        color_map = {name: mgrvi_to_hex(val) for name, val in mgrvi_map.items()}
+
         gdf_out = gdf.copy()
         if NAME_PROP in gdf_out.columns:
             gdf_out['GI']    = gdf_out[NAME_PROP].astype(str).map(gi_map)
@@ -831,14 +859,21 @@ class MainApp:
             gdf_out['GI']    = np.nan
             gdf_out['MGRVI'] = np.nan
 
+        if NAME_PROP in gdf_out.columns:
+            gdf_out['MGRVI_COLOR'] = gdf_out[NAME_PROP].astype(str).map(color_map)
+        else:
+            gdf_out['MGRVI_COLOR'] = '#94a3b8'
+
         safe_name = re.sub(r'[\\/:*?"<>|]', '_', self.field_name)
         poly_path = os.path.join(poly_dir, f"{safe_name}_{date_str}.geojson")
         gdf_out.to_file(poly_path, driver='GeoJSON')
 
+        col_color = f'MGRVI_COLOR_{date_str}'
         csv_path = os.path.join(RESULTATE_DIR, "greenness_index.csv")
         new_df   = pd.DataFrame({
             col_gi:    pd.Series(gi_map),
             col_mgrvi: pd.Series(mgrvi_map),
+            col_color: pd.Series(color_map),
         })
         new_df.index.name = 'Streifen'
 
@@ -857,14 +892,17 @@ class MainApp:
 
         n_ok  = sum(1 for v in gi_map.values() if not np.isnan(v))
         n_all = len(gi_map)
-        messagebox.showinfo(
-            "Fertig - Indizes berechnet",
-            f"Berechnung abgeschlossen!\n\n"
-            f"Polygone berechnet: {n_ok} / {n_all}\n\n"
-            f"Gespeichert in:\n  {RESULTATE_DIR}\n\n"
-            f"  Polygone: polygone_gi/{os.path.basename(poly_path)}\n"
-            f"  CSV:      greenness_index.csv\n"
-            f"  Spalten:  {col_gi}, {col_mgrvi}")
+        return dict(
+            gdf_out=gdf_out,
+            gi_map=gi_map,
+            mgrvi_map=mgrvi_map,
+            color_map=color_map,
+            date_str=date_str,
+            poly_path=poly_path,
+            csv_path=csv_path,
+            n_ok=n_ok,
+            n_all=n_all,
+        )
 
 
 # ==============================================================================
@@ -958,7 +996,10 @@ class PreviewWindow:
         self.canvas.draw()
 
     def _calc(self):
-        self.app.run_gi_calculation(self.app.gdf)
+        res = self.app.run_gi_calculation(self.app.gdf)
+        if res:
+            self.win.withdraw()
+            ResultsWindow(self.app, res, caller_win=self.win)
 
     def _edit(self):
         self.win.withdraw()
@@ -1824,14 +1865,352 @@ class EditorWindow:
 
     def _calculate(self):
         self.app.gdf = self.gdf_work.copy()
-        self.app.run_gi_calculation(self.app.gdf)
-        self.win.destroy()
-        self.preview.win.destroy()
-        self.app.root.deiconify()
+        res = self.app.run_gi_calculation(self.app.gdf)
+        if res:
+            self.win.destroy()
+            self.preview.win.destroy()
+            ResultsWindow(self.app, res, caller_win=None)
 
     def _cancel(self):
         self.win.destroy()
         self.preview.win.deiconify()
+
+
+# ==============================================================================
+# Ergebnis-Fenster
+# ==============================================================================
+
+class ResultsWindow:
+    """
+    Zeigt das Drohnenbild mit Polygon-Overlays, berechneten Indices und
+    MGRVI-Farbpunkten. Bietet Werkzeuge zum Anpassen der Darstellung und
+    zum Exportieren als PNG oder GeoJSON-Layer.
+    """
+
+    _FONTS    = ['Helvetica', 'Arial', 'DejaVu Sans', 'Courier New', 'Times New Roman']
+    _POSITIONS = ['Mitte', 'Oben', 'Unten', 'Links', 'Rechts']
+
+    def __init__(self, app: MainApp, res: dict, caller_win=None):
+        self.app        = app
+        self.res        = res
+        self.caller_win = caller_win   # wird beim Schliessen wieder eingeblendet
+
+        self.win = tk.Toplevel(app.root)
+        d = res['date_str']
+        self.win.title(f"Ergebnisse  ·  {app.field_name}  ·  {d}")
+        self.win.configure(bg=CLR_BG)
+        self.win.minsize(800, 560)
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.win.geometry(screen_geometry(self.win, 0.72, 0.86, 900, 660))
+
+        # Darstellungs-Zustand
+        self._show_colors  = True
+        self._font_family  = 'Helvetica'
+        self._font_size    = 8
+        self._label_pos    = 'Mitte'
+        self._offset_x     = 0.0
+        self._offset_y     = 0.0
+
+        self._build()
+
+    # ------------------------------------------------------------------
+    def _on_close(self):
+        plt.close(self.fig)
+        if self.caller_win is not None:
+            try:
+                self.caller_win.deiconify()
+            except Exception:
+                pass
+        else:
+            self.app.root.deiconify()
+        self.win.destroy()
+
+    # ------------------------------------------------------------------
+    def _build(self):
+        # ── Kontrollleiste (ganz unten) ───────────────────────────────
+        ctrl = tk.Frame(self.win, bg=CLR_CARD,
+                        highlightbackground=CLR_BORDER, highlightthickness=1)
+        ctrl.pack(side='bottom', fill='x', padx=8, pady=(0, 8))
+
+        row1 = tk.Frame(ctrl, bg=CLR_CARD)
+        row1.pack(fill='x', padx=14, pady=(10, 4))
+
+        # Label-Position
+        tk.Label(row1, text="Beschriftung:", font=FONT_LABEL,
+                 fg=CLR_TEXT_B, bg=CLR_CARD).pack(side='left', padx=(0, 6))
+        self._pos_var = tk.StringVar(value=self._label_pos)
+        pos_cb = ttk.Combobox(row1, textvariable=self._pos_var,
+                              values=self._POSITIONS,
+                              state='readonly', width=8, font=FONT_LABEL)
+        pos_cb.pack(side='left', padx=(0, 16))
+        pos_cb.bind('<<ComboboxSelected>>', lambda _: self._on_pos_change())
+
+        # Schriftgroesse
+        tk.Label(row1, text="Groesse:", font=FONT_LABEL,
+                 fg=CLR_TEXT_B, bg=CLR_CARD).pack(side='left', padx=(0, 4))
+        self._size_var = tk.IntVar(value=self._font_size)
+        tk.Spinbox(row1, from_=5, to=24, textvariable=self._size_var,
+                   width=4, font=FONT_LABEL, command=self._on_size_change
+                   ).pack(side='left', padx=(0, 16))
+
+        # Schriftart
+        tk.Label(row1, text="Schrift:", font=FONT_LABEL,
+                 fg=CLR_TEXT_B, bg=CLR_CARD).pack(side='left', padx=(0, 4))
+        self._font_var = tk.StringVar(value=self._font_family)
+        font_cb = ttk.Combobox(row1, textvariable=self._font_var,
+                               values=self._FONTS,
+                               state='readonly', width=14, font=FONT_LABEL)
+        font_cb.pack(side='left', padx=(0, 16))
+        font_cb.bind('<<ComboboxSelected>>', lambda _: self._on_font_change())
+
+        # Offset
+        tk.Label(row1, text="Versatz X:", font=FONT_LABEL,
+                 fg=CLR_TEXT_B, bg=CLR_CARD).pack(side='left', padx=(0, 4))
+        self._ox_var = tk.StringVar(value="0.0")
+        tk.Entry(row1, textvariable=self._ox_var, width=6,
+                 font=FONT_LABEL).pack(side='left', padx=(0, 6))
+        tk.Label(row1, text="Y:", font=FONT_LABEL,
+                 fg=CLR_TEXT_B, bg=CLR_CARD).pack(side='left', padx=(0, 4))
+        self._oy_var = tk.StringVar(value="0.0")
+        tk.Entry(row1, textvariable=self._oy_var, width=6,
+                 font=FONT_LABEL).pack(side='left', padx=(0, 8))
+        make_ghost_btn(row1, "Anwenden",
+                       self._apply_offset).pack(side='left')
+
+        row2 = tk.Frame(ctrl, bg=CLR_CARD)
+        row2.pack(fill='x', padx=14, pady=(0, 10))
+
+        self._btn_colors = make_secondary_btn(
+            row2, "Farben ausblenden", self._toggle_colors)
+        self._btn_colors.pack(side='left', padx=(0, 8))
+
+        make_ghost_btn(row2, "Als PNG speichern",
+                       self._export_png).pack(side='left', padx=(0, 8))
+        make_ghost_btn(row2, "GeoJSON-Layer speichern",
+                       self._save_geojson_layers).pack(side='left', padx=(0, 8))
+        make_danger_btn(row2, "Schliessen",
+                        self._on_close).pack(side='right')
+
+        # ── Canvas ────────────────────────────────────────────────────
+        cf = tk.Frame(self.win, bg=CLR_BG)
+        cf.pack(side='top', fill='both', expand=True, padx=8, pady=(8, 0))
+
+        fw, fh = canvas_figsize(self.win, w_frac=0.68, h_frac=0.58)
+        self.fig, self.ax = plt.subplots(figsize=(fw, fh), dpi=96)
+        self.fig.patch.set_facecolor(CLR_BG)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=cf)
+        self.canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        tb_frame = tk.Frame(self.win, bg=CLR_CARD,
+                            highlightbackground=CLR_BORDER, highlightthickness=1)
+        tb_frame.pack(side='bottom', fill='x', padx=8, pady=(0, 2))
+        self._toolbar = NavigationToolbar2Tk(self.canvas, tb_frame)
+        self._toolbar.update()
+
+        self._draw()
+
+    # ------------------------------------------------------------------
+    def _label_xy(self, geom):
+        """Gibt (x, y) fuer die Beschriftung zurueck (je nach Position)."""
+        cx, cy = geom.centroid.x, geom.centroid.y
+        minx, miny, maxx, maxy = geom.bounds
+        h = maxy - miny
+        w = maxx - minx
+        pos = self._label_pos
+        if pos == 'Oben':
+            cy = cy + h * 0.25
+        elif pos == 'Unten':
+            cy = cy - h * 0.25
+        elif pos == 'Links':
+            cx = cx - w * 0.25
+        elif pos == 'Rechts':
+            cx = cx + w * 0.25
+        return cx + self._offset_x, cy + self._offset_y
+
+    def _draw(self):
+        self.ax.clear()
+        self.ax.set_facecolor('#0f172a')
+        bounds = self.app.raster_bounds
+        ext    = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+        self.ax.imshow(self.app.rgb_norm, extent=ext, aspect='equal',
+                       origin='upper', interpolation='bilinear')
+        _setup_axes(self.ax)
+
+        gc        = self.res['gdf_out'].geometry.name
+        gi_map    = self.res['gi_map']
+        mgrvi_map = self.res['mgrvi_map']
+        color_map = self.res['color_map']
+
+        for _, row in self.res['gdf_out'].iterrows():
+            geom = row[gc]
+            if geom is None or geom.is_empty:
+                continue
+            name = (str(row[NAME_PROP]) if NAME_PROP in row.index
+                    else str(row.name))
+
+            # Weisse Polygon-Umrandung
+            polys = ([geom] if geom.geom_type == 'Polygon'
+                     else list(geom.geoms))
+            for poly in polys:
+                xs, ys = poly.exterior.xy
+                self.ax.plot(xs, ys, color='white', linewidth=1.5, zorder=3)
+
+            gi_val    = gi_map.get(name, float('nan'))
+            mgrvi_val = mgrvi_map.get(name, float('nan'))
+            hex_col   = color_map.get(name, '#94a3b8')
+
+            if math.isnan(gi_val) or math.isnan(mgrvi_val):
+                continue
+
+            lx, ly = self._label_xy(geom)
+
+            # Farbpunkt (ueber dem Text)
+            if self._show_colors:
+                dot_offset = (bounds.top - bounds.bottom) * 0.003
+                self.ax.plot(lx, ly + dot_offset * 3.5,
+                             'o', color=hex_col, markersize=9, zorder=6,
+                             markeredgecolor='white', markeredgewidth=0.6)
+
+            # Index-Text (weiss)
+            label = f"GI: {gi_val:.3f}\nMGRVI: {mgrvi_val:.3f}"
+            self.ax.text(lx, ly, label,
+                         fontsize=self._font_size,
+                         fontfamily=self._font_family,
+                         color='white', ha='center', va='top',
+                         zorder=5,
+                         bbox=dict(boxstyle='round,pad=0.25',
+                                   fc='#00000066', ec='none'))
+
+        self.ax.set_title(
+            f"{self.app.field_name}  ·  {self.res['date_str']}  "
+            f"·  {self.res['n_ok']}/{self.res['n_all']} Polygone",
+            fontsize=10, color=CLR_TEXT_H, pad=8)
+        self.fig.tight_layout(pad=1.0)
+        self.canvas.draw()
+
+    # ------------------------------------------------------------------
+    def _on_pos_change(self):
+        self._label_pos = self._pos_var.get()
+        self._draw()
+
+    def _on_size_change(self):
+        self._font_size = self._size_var.get()
+        self._draw()
+
+    def _on_font_change(self):
+        self._font_family = self._font_var.get()
+        self._draw()
+
+    def _apply_offset(self):
+        try:
+            self._offset_x = float(self._ox_var.get())
+            self._offset_y = float(self._oy_var.get())
+        except ValueError:
+            messagebox.showerror("Ungueltige Eingabe",
+                                 "Bitte Zahlen fuer X und Y eingeben.",
+                                 parent=self.win)
+            return
+        self._draw()
+
+    def _toggle_colors(self):
+        self._show_colors = not self._show_colors
+        self._btn_colors.config(
+            text="Farben einblenden" if not self._show_colors
+                 else "Farben ausblenden")
+        self._draw()
+
+    # ------------------------------------------------------------------
+    def _export_png(self):
+        os.makedirs(KARTEN_DIR, exist_ok=True)
+        safe  = re.sub(r'[\\/:*?"<>|]', '_', self.app.field_name)
+        fname = f"{safe}_{self.res['date_str']}.png"
+        path  = filedialog.asksaveasfilename(
+            title="PNG speichern",
+            initialdir=KARTEN_DIR,
+            initialfile=fname,
+            defaultextension='.png',
+            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("Alle", "*.*")],
+            parent=self.win)
+        if not path:
+            return
+        try:
+            self.fig.savefig(path, dpi=200, bbox_inches='tight',
+                             facecolor=self.fig.get_facecolor())
+            messagebox.showinfo("Gespeichert", f"Abbildung gespeichert:\n{path}",
+                                parent=self.win)
+        except Exception as exc:
+            messagebox.showerror("Fehler", str(exc), parent=self.win)
+
+    # ------------------------------------------------------------------
+    def _save_geojson_layers(self):
+        """
+        Speichert drei GeoJSON-Dateien in einem Unterordner:
+          polygone.geojson   – Polygon-Geometrien mit GI/MGRVI/Farbe
+          beschriftungen.geojson – Punkt-Features mit Index-Texten
+          farben.geojson     – Punkt-Features mit MGRVI-Farbe (symbolisierbar)
+        """
+        safe    = re.sub(r'[\\/:*?"<>|]', '_', self.app.field_name)
+        out_dir = os.path.join(KARTEN_DIR,
+                               f"{safe}_{self.res['date_str']}")
+        os.makedirs(out_dir, exist_ok=True)
+
+        gdf_base  = self.res['gdf_out'].copy()
+        gi_map    = self.res['gi_map']
+        mgrvi_map = self.res['mgrvi_map']
+        color_map = self.res['color_map']
+
+        try:
+            # Layer 1: Polygone
+            gdf_base.to_file(
+                os.path.join(out_dir, 'polygone.geojson'), driver='GeoJSON')
+
+            # Layer 2 & 3: Punkte (Schwerpunkte)
+            rows_lbl, rows_col = [], []
+            gc = gdf_base.geometry.name
+            for _, row in gdf_base.iterrows():
+                geom = row[gc]
+                if geom is None or geom.is_empty:
+                    continue
+                name      = (str(row[NAME_PROP]) if NAME_PROP in row.index
+                             else str(row.name))
+                gi_val    = gi_map.get(name, float('nan'))
+                mgrvi_val = mgrvi_map.get(name, float('nan'))
+                hex_col   = color_map.get(name, '#94a3b8')
+                cx, cy    = geom.centroid.x, geom.centroid.y
+                from shapely.geometry import Point as _Pt
+                pt = _Pt(cx, cy)
+                rows_lbl.append({
+                    'geometry': pt,
+                    NAME_PROP: name,
+                    'GI':     round(gi_val,    4) if not math.isnan(gi_val)    else None,
+                    'MGRVI':  round(mgrvi_val, 4) if not math.isnan(mgrvi_val) else None,
+                    'label':  (f"GI:{gi_val:.3f} MGRVI:{mgrvi_val:.3f}"
+                               if not (math.isnan(gi_val) or math.isnan(mgrvi_val))
+                               else ''),
+                })
+                rows_col.append({
+                    'geometry':    pt,
+                    NAME_PROP:     name,
+                    'MGRVI_COLOR': hex_col,
+                    'MGRVI':       round(mgrvi_val, 4) if not math.isnan(mgrvi_val) else None,
+                })
+
+            gpd.GeoDataFrame(rows_lbl, crs=gdf_base.crs).to_file(
+                os.path.join(out_dir, 'beschriftungen.geojson'),
+                driver='GeoJSON')
+            gpd.GeoDataFrame(rows_col, crs=gdf_base.crs).to_file(
+                os.path.join(out_dir, 'farben.geojson'),
+                driver='GeoJSON')
+
+            messagebox.showinfo(
+                "GeoJSON gespeichert",
+                f"3 Layer-Dateien gespeichert in:\n{out_dir}\n\n"
+                f"  polygone.geojson\n"
+                f"  beschriftungen.geojson\n"
+                f"  farben.geojson",
+                parent=self.win)
+        except Exception as exc:
+            messagebox.showerror("Fehler", str(exc), parent=self.win)
 
 
 # ==============================================================================
