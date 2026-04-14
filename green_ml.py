@@ -2095,8 +2095,8 @@ class ResultsWindow:
                              'o', color=hex_col, markersize=9, zorder=6,
                              markeredgecolor='white', markeredgewidth=0.6)
 
-            # Index-Text (weiss)
-            label = f"GI: {gi_val:.3f}\nMGRVI: {mgrvi_val:.3f}"
+            # Index-Text + Streifenname (weiss)
+            label = f"{name}\nGI: {gi_val:.3f}\nMGRVI: {mgrvi_val:.3f}"
             self.ax.text(lx, ly, label,
                          fontsize=self._font_size,
                          fontfamily=self._font_family,
@@ -2261,9 +2261,9 @@ class ResultsWindow:
                     NAME_PROP: name,
                     'GI':     round(gi_val,    4) if not math.isnan(gi_val)    else None,
                     'MGRVI':  round(mgrvi_val, 4) if not math.isnan(mgrvi_val) else None,
-                    'label':  (f"GI:{gi_val:.3f} MGRVI:{mgrvi_val:.3f}"
+                    'label':  (f"{name} | GI:{gi_val:.3f} MGRVI:{mgrvi_val:.3f}"
                                if not (math.isnan(gi_val) or math.isnan(mgrvi_val))
-                               else ''),
+                               else name),
                 })
                 rows_col.append({
                     'geometry':    pt,
