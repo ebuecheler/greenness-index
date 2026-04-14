@@ -1893,7 +1893,7 @@ class ResultsWindow:
     def __init__(self, app: MainApp, res: dict, caller_win=None):
         self.app        = app
         self.res        = res
-        self.caller_win = caller_win   # wird beim Schliessen wieder eingeblendet
+        self.caller_win = caller_win
 
         self.win = tk.Toplevel(app.root)
         d = res['date_str']
@@ -1910,6 +1910,11 @@ class ResultsWindow:
         self._label_pos    = 'Mitte'
         self._offset_x     = 0.0
         self._offset_y     = 0.0
+
+        # Pan/Zoom-Zustand
+        self._panning        = False
+        self._pan_last_pix   = None
+        self._last_scroll_t  = 0.0
 
         self._build()
 
@@ -1991,9 +1996,19 @@ class ResultsWindow:
         make_danger_btn(row2, "Schliessen",
                         self._on_close).pack(side='right')
 
+        # ── Zoom-Hinweis ──────────────────────────────────────────────
+        hint = tk.Frame(self.win, bg=CLR_HINT_BG,
+                        highlightbackground=CLR_HINT_BD, highlightthickness=1)
+        hint.pack(side='top', fill='x', padx=8, pady=(4, 0))
+        tk.Label(hint,
+                 text="Scrollen = Zoomen    Linksklick + Ziehen = Verschieben    "
+                      "Doppelklick = Gesamtansicht zuruecksetzen",
+                 bg=CLR_HINT_BG, fg=CLR_BLUE, font=FONT_SMALL
+                 ).pack(side='left', padx=14, pady=5)
+
         # ── Canvas ────────────────────────────────────────────────────
         cf = tk.Frame(self.win, bg=CLR_BG)
-        cf.pack(side='top', fill='both', expand=True, padx=8, pady=(8, 0))
+        cf.pack(side='top', fill='both', expand=True, padx=8, pady=(4, 0))
 
         fw, fh = canvas_figsize(self.win, w_frac=0.68, h_frac=0.58)
         self.fig, self.ax = plt.subplots(figsize=(fw, fh), dpi=96)
@@ -2001,11 +2016,11 @@ class ResultsWindow:
         self.canvas = FigureCanvasTkAgg(self.fig, master=cf)
         self.canvas.get_tk_widget().pack(fill='both', expand=True)
 
-        tb_frame = tk.Frame(self.win, bg=CLR_CARD,
-                            highlightbackground=CLR_BORDER, highlightthickness=1)
-        tb_frame.pack(side='bottom', fill='x', padx=8, pady=(0, 2))
-        self._toolbar = NavigationToolbar2Tk(self.canvas, tb_frame)
-        self._toolbar.update()
+        # Maus-Events fuer Zoom + Pan
+        self.canvas.mpl_connect('scroll_event',        self._on_scroll)
+        self.canvas.mpl_connect('button_press_event',  self._on_pan_press)
+        self.canvas.mpl_connect('motion_notify_event', self._on_pan_motion)
+        self.canvas.mpl_connect('button_release_event',self._on_pan_release)
 
         self._draw()
 
@@ -2028,6 +2043,10 @@ class ResultsWindow:
         return cx + self._offset_x, cy + self._offset_y
 
     def _draw(self):
+        # Zoom-Stand sichern (leer beim allerersten Aufruf)
+        xlim_save = self.ax.get_xlim() if self.ax.images else None
+        ylim_save = self.ax.get_ylim() if self.ax.images else None
+
         self.ax.clear()
         self.ax.set_facecolor('#0f172a')
         bounds = self.app.raster_bounds
@@ -2035,6 +2054,11 @@ class ResultsWindow:
         self.ax.imshow(self.app.rgb_norm, extent=ext, aspect='equal',
                        origin='upper', interpolation='bilinear')
         _setup_axes(self.ax)
+
+        # Zoom wiederherstellen
+        if xlim_save is not None:
+            self.ax.set_xlim(xlim_save)
+            self.ax.set_ylim(ylim_save)
 
         gc        = self.res['gdf_out'].geometry.name
         gi_map    = self.res['gi_map']
@@ -2118,6 +2142,59 @@ class ResultsWindow:
             text="Farben einblenden" if not self._show_colors
                  else "Farben ausblenden")
         self._draw()
+
+    # ------------------------------------------------------------------
+    # Zoom & Pan
+    # ------------------------------------------------------------------
+
+    def _on_scroll(self, event):
+        if event.inaxes != self.ax or event.xdata is None:
+            return
+        now = time.monotonic()
+        if now - self._last_scroll_t < 0.05:
+            return
+        self._last_scroll_t = now
+        factor = 0.8 if event.button == 'up' else 1.25
+        xc, yc = event.xdata, event.ydata
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        self.ax.set_xlim([xc + (x - xc) * factor for x in xlim])
+        self.ax.set_ylim([yc + (y - yc) * factor for y in ylim])
+        self.canvas.draw_idle()
+
+    def _on_pan_press(self, event):
+        if event.button == 1 and event.inaxes == self.ax:
+            self._panning      = True
+            self._pan_last_pix = (event.x, event.y)
+        elif event.button == 1 and event.dblclick:
+            # Doppelklick: Gesamtansicht zuruecksetzen
+            bounds = self.app.raster_bounds
+            self.ax.set_xlim(bounds.left,  bounds.right)
+            self.ax.set_ylim(bounds.bottom, bounds.top)
+            self.canvas.draw_idle()
+
+    def _on_pan_motion(self, event):
+        if not self._panning or self._pan_last_pix is None:
+            return
+        if event.x is None or event.y is None:
+            return
+        dx_pix = event.x - self._pan_last_pix[0]
+        dy_pix = event.y - self._pan_last_pix[1]
+        self._pan_last_pix = (event.x, event.y)
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        bbox = self.ax.get_window_extent()
+        if bbox.width > 0 and bbox.height > 0:
+            xs = (xlim[1] - xlim[0]) / bbox.width
+            ys = (ylim[1] - ylim[0]) / bbox.height
+            self.ax.set_xlim(xlim[0] - dx_pix * xs, xlim[1] - dx_pix * xs)
+            self.ax.set_ylim(ylim[0] + dy_pix * ys, ylim[1] + dy_pix * ys)
+            self.canvas.draw_idle()
+
+    def _on_pan_release(self, event):
+        if event.button == 1:
+            self._panning      = False
+            self._pan_last_pix = None
 
     # ------------------------------------------------------------------
     def _export_png(self):
