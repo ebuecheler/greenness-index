@@ -2089,9 +2089,13 @@ class ResultsWindow:
             lx, ly = self._label_xy(geom)
 
             # Farbpunkt (ueber dem Text)
+            # Offset basiert auf der Polygon-Hoehe, damit der Punkt nach dem
+            # Bearbeiten immer innerhalb des richtigen Polygons bleibt.
             if self._show_colors:
-                dot_offset = (bounds.top - bounds.bottom) * 0.003
-                self.ax.plot(lx, ly + dot_offset * 3.5,
+                _, miny_p, _, maxy_p = geom.bounds
+                poly_h = maxy_p - miny_p
+                dot_y  = ly + poly_h * 0.20
+                self.ax.plot(lx, dot_y,
                              'o', color=hex_col, markersize=9, zorder=6,
                              markeredgecolor='white', markeredgewidth=0.6)
 
