@@ -2088,18 +2088,14 @@ class ResultsWindow:
 
             lx, ly = self._label_xy(geom)
 
-            # Farbpunkt (ueber dem Text)
-            # Offset basiert auf der Polygon-Hoehe, damit der Punkt nach dem
-            # Bearbeiten immer innerhalb des richtigen Polygons bleibt.
+            # Farbpunkt: kein Y-Offset – liegt immer am Schwerpunkt des
+            # eigenen Polygons, unabhaengig von Polygongroesse oder Bearbeitung.
             if self._show_colors:
-                _, miny_p, _, maxy_p = geom.bounds
-                poly_h = maxy_p - miny_p
-                dot_y  = ly + poly_h * 0.20
-                self.ax.plot(lx, dot_y,
+                self.ax.plot(lx, ly,
                              'o', color=hex_col, markersize=9, zorder=6,
                              markeredgecolor='white', markeredgewidth=0.6)
 
-            # Index-Text + Streifenname (weiss)
+            # Index-Text + Streifenname (weiss) – beginnt unterhalb des Punktes
             label = f"{name}\nGI: {gi_val:.3f}\nMGRVI: {mgrvi_val:.3f}"
             self.ax.text(lx, ly, label,
                          fontsize=self._font_size,

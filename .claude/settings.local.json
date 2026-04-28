@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python green_ml.py)"
+      "Bash(python green_ml.py)",
+      "Bash(python -m py_compile green_ml.py)"
     ]
   }
 }
