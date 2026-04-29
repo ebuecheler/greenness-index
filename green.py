@@ -275,6 +275,16 @@ def load_layout_file(field: str, name: str,
     return gdf.reset_index(drop=True)
 
 
+def is_already_calculated(field: str, date_str: str) -> bool:
+    """Prueft ob fuer dieses Feld + Datum bereits ein Ergebnis gespeichert ist."""
+    if not field or not date_str:
+        return False
+    poly_dir  = os.path.join(RESULTATE_DIR, "polygone_gi")
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', field)
+    poly_path = os.path.join(poly_dir, f"{safe_name}_{date_str}.geojson")
+    return os.path.isfile(poly_path)
+
+
 def normalize_rgb(arr: np.ndarray) -> np.ndarray:
     """
     Wandelt (3, H, W) -> (H, W, 3) float32 [0..1] um.
@@ -473,6 +483,17 @@ class MainApp:
                        self._refresh_fields).pack(side='left')
         self._refresh_fields()
 
+        # ── Berechnungsstatus ─────────────────────────────────────────────────
+        self.frm_status = tk.Frame(outer, bg=CLR_BG,
+                                   highlightbackground=CLR_BORDER,
+                                   highlightthickness=0)
+        self.frm_status.pack(fill='x', pady=(0, 10))
+        self.lbl_calc_status = tk.Label(
+            self.frm_status, text="",
+            font=FONT_SMALL, fg=CLR_TEXT_S, bg=CLR_BG,
+            anchor='w', padx=12, pady=6)
+        self.lbl_calc_status.pack(fill='x')
+
         # ── CTA ───────────────────────────────────────────────────────────────
         self.btn_start = make_primary_btn(
             outer, "Vorschau anzeigen  ->",
@@ -530,6 +551,30 @@ class MainApp:
                                       activebackground=CLR_TEXT_D)
                 self.btn_start.unbind('<Enter>')
                 self.btn_start.unbind('<Leave>')
+
+        # ── Berechnungsstatus aktualisieren ───────────────────────────────────
+        if hasattr(self, 'lbl_calc_status'):
+            field = self.field_var.get()
+            date  = self.image_date
+            if field and date:
+                d_human = f"{date[4:]}.{date[2:4]}.20{date[:2]}"
+                if is_already_calculated(field, date):
+                    txt = f"✓  Bereits berechnet  ·  {field}  ·  {d_human}"
+                    fg  = CLR_GREEN
+                    bg  = CLR_GREEN_L
+                else:
+                    txt = f"○  Noch nicht berechnet  ·  {field}  ·  {d_human}"
+                    fg  = CLR_AMBER
+                    bg  = "#fffbeb"
+                self.frm_status.config(bg=bg,
+                                       highlightbackground=CLR_BORDER_D,
+                                       highlightthickness=1)
+                self.lbl_calc_status.config(text=txt, fg=fg, bg=bg,
+                                             font=("Helvetica", 9, "bold"))
+            else:
+                self.frm_status.config(bg=CLR_BG, highlightthickness=0)
+                self.lbl_calc_status.config(text="", bg=CLR_BG,
+                                             font=FONT_SMALL)
 
     def load_data(self) -> bool:
         try:
