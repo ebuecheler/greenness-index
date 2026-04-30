@@ -19,17 +19,17 @@ Berechnung des **Greenness Index (GI = G / R+G+B)** aus RGB-Drohnenfotos mit int
 
 ```bash
 pip install -r requirements.txt
-python green.py
+python green_ml.py
 ```
 
 ## Ordnerstruktur
 
 ```
 Greenness Index/
-├── green.py              # Hauptprogramm
+├── green_ml.py           # Hauptprogramm (aktuell)
 ├── requirements.txt      # Python-Abhängigkeiten
 ├── polygone/             # Polygon-Definitionen (GeoJSON) pro Feld
-└── Resultate GI/         # Berechnete Ergebnisse (lokal, nicht im Repo)
+└── Resultate GI/         # Berechnete Ergebnisse
 ```
 
 ## Drohnenbilder
