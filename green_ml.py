@@ -505,6 +505,19 @@ def learn_and_predict(field: str, target_crs) -> gpd.GeoDataFrame | None:
     return _weighted_mean_gdf(saved_gdfs)
 
 
+def check_already_calculated(field: str, date_str: str) -> bool:
+    """
+    Gibt True zurueck wenn fuer dieses Feld + Datum bereits
+    eine berechnete GeoJSON-Datei unter Resultate GI/polygone_gi existiert.
+    """
+    if not field or not date_str:
+        return False
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', field)
+    poly_dir  = os.path.join(RESULTATE_DIR, "polygone_gi")
+    poly_path = os.path.join(poly_dir, f"{safe_name}_{date_str}.geojson")
+    return os.path.isfile(poly_path)
+
+
 def normalize_rgb(arr: np.ndarray) -> np.ndarray:
     """
     Wandelt (3, H, W) -> (H, W, 3) float32 [0..1] um.
@@ -698,10 +711,16 @@ class MainApp:
                                       state='readonly', width=32,
                                       font=FONT_LABEL)
         self.field_cb.pack(side='left', padx=(0, 12))
-        self.field_cb.bind('<<ComboboxSelected>>', lambda _: self._check_ready())
+        self.field_cb.bind('<<ComboboxSelected>>', lambda _: self._check_ready_and_status())
         make_ghost_btn(r2, "Aktualisieren",
                        self._refresh_fields).pack(side='left')
         self._refresh_fields()
+
+        # ── Status: bereits berechnet? ────────────────────────────────────────
+        self.lbl_status = tk.Label(
+            outer, text="", font=FONT_SMALL,
+            bg=CLR_BG, anchor='w', pady=2)
+        self.lbl_status.pack(fill='x', pady=(0, 8))
 
         # ── CTA ───────────────────────────────────────────────────────────────
         self.btn_start = make_primary_btn(
@@ -748,8 +767,37 @@ class MainApp:
                 fg=CLR_AMBER)
         self._check_ready()
 
+    def _check_ready_and_status(self):
+        """Wird beim Wechsel des Feldes im Dropdown aufgerufen."""
+        self._check_ready()
+
+    def _update_calc_status(self):
+        """Aktualisiert das Status-Label: zeigt ob Bild+Feld bereits berechnet wurde."""
+        if not hasattr(self, 'lbl_status'):
+            return
+        field    = self.field_var.get()
+        date_str = self.image_date
+        if not field or not date_str:
+            self.lbl_status.config(text="", bg=CLR_BG)
+            return
+        if check_already_calculated(field, date_str):
+            d = date_str
+            human = f"{d[4:]}.{d[2:4]}.20{d[:2]}"
+            self.lbl_status.config(
+                text=f"  ✓  Bereits berechnet  ·  {field}  ·  {human}",
+                fg=CLR_GREEN, bg=CLR_GREEN_L,
+                font=("Helvetica", 9, "bold"),
+                relief='flat', padx=10)
+        else:
+            self.lbl_status.config(
+                text="  ○  Noch nicht berechnet",
+                fg=CLR_AMBER, bg="#fffbeb",
+                font=("Helvetica", 9),
+                relief='flat', padx=10)
+
     def _check_ready(self):
         ok = bool(self.image_path and self.field_var.get())
+        self._update_calc_status()
         if hasattr(self, 'btn_start'):
             if ok:
                 self.btn_start.config(state='normal', bg=CLR_GREEN,
