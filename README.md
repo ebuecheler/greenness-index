@@ -1,6 +1,11 @@
 # Greenness Index – Hoflabor
 
-Berechnung des **Greenness Index (GI = G / R+G+B)** aus RGB-Drohnenfotos mit interaktivem Polygon-Editor.
+Berechnung von Vegetationsindizes aus RGB-Drohnenfotos mit interaktivem Polygon-Editor.
+
+| Index | Formel | Beschreibung |
+|-------|--------|--------------|
+| **GI** | `G / (R + G + B)` | Greenness Index |
+| **MGRVI** | `(G² − R²) / (G² + R²)` | Modified Green Red Vegetation Index |
 
 **Autor:** Eve Bücheler · [Hoflabor](https://hoflabor.ch)
 
